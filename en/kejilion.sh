@@ -1,5 +1,5 @@
 #!/bin/bash
-sh_v="4.0.10"
+sh_v="4.1.0"
 
 
 gl_hui='\e[37m'
@@ -5959,7 +5959,7 @@ ssh_manager() {
 	while true; do
 		clear
 		echo "SSH Remote Connection Tool"
-		echo "Can be connected to other Linux systems via SSH"
+		echo "Can connect to other Linux systems via SSH"
 		echo "------------------------"
 		list_connections
 		echo "1. Create a new connection 2. Use a connection 3. Delete a connection"
@@ -6850,6 +6850,326 @@ linux_bbr() {
 
 
 
+docker_ssh_migration() {
+
+	GREEN='\033[0;32m'
+	RED='\033[0;31m'
+	YELLOW='\033[1;33m'
+	BLUE='\033[0;36m'
+	NC='\033[0m'
+
+	BACKUP_ROOT="/tmp"
+	DATE_STR=$(date +%Y%m%d_%H%M%S)
+
+
+	is_compose_container() {
+		local container=$1
+		docker inspect "$container" | jq -e '.[0].Config.Labels["com.docker.compose.project"]' >/dev/null 2>&1
+	}
+
+	list_backups() {
+		echo -e "${BLUE}Current backup list:${NC}"
+		ls -dt ${BACKUP_ROOT}/docker_backup_* 2>/dev/null || echo "No backup"
+	}
+
+
+
+	# ----------------------------
+	# Backup
+	# ----------------------------
+	backup_docker() {
+		echo -e "${YELLOW}Backing up Docker container...${NC}"
+		read -p "Please enter the name of the container to be backed up (separated by multiple spaces, and the Enter backup is all running containers):" containers
+
+		install tar jq gzip
+		install_docker
+
+		local TARGET_CONTAINERS=()
+		if [ -z "$containers" ]; then
+			mapfile -t TARGET_CONTAINERS < <(docker ps --format '{{.Names}}')
+		else
+			read -ra TARGET_CONTAINERS <<< "$containers"
+		fi
+		[[ ${#TARGET_CONTAINERS[@]} -eq 0 ]] && { echo -e "${RED}No container found${NC}"; return; }
+
+		local BACKUP_DIR="${BACKUP_ROOT}/docker_backup_${DATE_STR}"
+		mkdir -p "$BACKUP_DIR"
+
+		local RESTORE_SCRIPT="${BACKUP_DIR}/docker_restore.sh"
+		echo "#!/bin/bash" > "$RESTORE_SCRIPT"
+		echo "set -e" >> "$RESTORE_SCRIPT"
+		echo "# Automatically generated restore script" >> "$RESTORE_SCRIPT"
+
+		# Record the path of the packaged Compose project to avoid duplicate packaging
+		declare -A PACKED_COMPOSE_PATHS=()
+
+		for c in "${TARGET_CONTAINERS[@]}"; do
+			echo -e "${GREEN}Backup container:$c${NC}"
+			local inspect_file="${BACKUP_DIR}/${c}_inspect.json"
+			docker inspect "$c" > "$inspect_file"
+
+			if is_compose_container "$c"; then
+				echo -e "${BLUE}Detected$cYes docker-compose container${NC}"
+				local project_dir=$(docker inspect "$c" | jq -r '.[0].Config.Labels["com.docker.compose.project.working_dir"] // empty')
+				local project_name=$(docker inspect "$c" | jq -r '.[0].Config.Labels["com.docker.compose.project"] // empty')
+
+				if [ -z "$project_dir" ]; then
+					read -p "The compose directory is not detected, please enter the path manually:" project_dir
+				fi
+
+				# If the Compose project has been packaged, skip it
+				if [[ -n "${PACKED_COMPOSE_PATHS[$project_dir]}" ]]; then
+					echo -e "${YELLOW}Compose project [$project_name] Backed up, skip duplicate packaging...${NC}"
+					continue
+				fi
+
+				if [ -f "$project_dir/docker-compose.yml" ]; then
+					echo "compose" > "${BACKUP_DIR}/backup_type_${project_name}"
+					echo "$project_dir" > "${BACKUP_DIR}/compose_path_${project_name}.txt"
+					tar -czf "${BACKUP_DIR}/compose_project_${project_name}.tar.gz" -C "$project_dir" .
+					echo "# docker-compose recovery:$project_name" >> "$RESTORE_SCRIPT"
+					echo "cd \"$project_dir\" && docker compose up -d" >> "$RESTORE_SCRIPT"
+					PACKED_COMPOSE_PATHS["$project_dir"]=1
+					echo -e "${GREEN}Compose project [$project_name] Packed:${project_dir}${NC}"
+				else
+					echo -e "${RED}docker-compose.yml not found, skip this container...${NC}"
+				fi
+			else
+				# Normal container backup volume
+				local VOL_PATHS
+				VOL_PATHS=$(docker inspect "$c" --format '{{range .Mounts}}{{.Source}} {{end}}')
+				for path in $VOL_PATHS; do
+					echo "Packing rolls:$path"
+					tar -czpf "${BACKUP_DIR}/${c}_$(basename $path).tar.gz" -C / "$(echo $path | sed 's/^\///')"
+				done
+
+				# port
+				local PORT_ARGS=""
+				mapfile -t PORTS < <(jq -r '.[0].HostConfig.PortBindings | to_entries[] | "\(.value[0].HostPort):\(.key | split("/")[0])"' "$inspect_file" 2>/dev/null)
+				for p in "${PORTS[@]}"; do PORT_ARGS+="-p $p "; done
+
+				# Environment variables
+				local ENV_VARS=""
+				mapfile -t ENVS < <(jq -r '.[0].Config.Env[] | @sh' "$inspect_file")
+				for e in "${ENVS[@]}"; do ENV_VARS+="-e $e "; done
+
+				# Volume Mapping
+				local VOL_ARGS=""
+				for path in $VOL_PATHS; do VOL_ARGS+="-v $path:$path "; done
+
+				# Mirror
+				local IMAGE
+				IMAGE=$(jq -r '.[0].Config.Image' "$inspect_file")
+
+				echo -e "\n# Restore container:$c" >> "$RESTORE_SCRIPT"
+				echo "docker run -d --name $c $PORT_ARGS $VOL_ARGS $ENV_VARS $IMAGE" >> "$RESTORE_SCRIPT"
+			fi
+		done
+
+
+		# Backup all files under /home/docker (excluding subdirectories)
+		if [ -d "/home/docker" ]; then
+			echo -e "${BLUE}Backup the files under /home/docker...${NC}"
+			find /home/docker -maxdepth 1 -type f -print0 | tar --null -czf "${BACKUP_DIR}/home_docker_files.tar.gz" --files-from -
+			echo -e "${GREEN}The file under /home/docker has been packaged to:${BACKUP_DIR}/home_docker_files.tar.gz${NC}"
+		fi
+
+		chmod +x "$RESTORE_SCRIPT"
+		echo -e "${GREEN}Backup is complete:${BACKUP_DIR}${NC}"
+		echo -e "${GREEN}Available restore scripts:${RESTORE_SCRIPT}${NC}"
+
+
+	}
+
+	# ----------------------------
+	# reduction
+	# ----------------------------
+	restore_docker() {
+		list_backups
+		read -p "Please enter the backup directory to restore:" BACKUP_DIR
+		[[ ! -d "$BACKUP_DIR" ]] && { echo -e "${RED}The backup directory does not exist${NC}"; return; }
+
+		echo -e "${BLUE}Start the restore operation...${NC}"
+
+		install tar jq gzip
+		install_docker
+
+		# -------------------------
+		for f in "$BACKUP_DIR"/backup_type_*; do
+			[[ ! -f "$f" ]] && continue
+			if grep -q "compose" "$f"; then
+				project_name=$(basename "$f" | sed 's/backup_type_//')
+				path_file="$BACKUP_DIR/compose_path_${project_name}.txt"
+				[[ -f "$path_file" ]] && original_path=$(cat "$path_file") || original_path=""
+				[[ -z "$original_path" ]] && read -p "The original path was not found, please enter the restore directory path:" original_path
+
+				# Check if the container for the compose project is already running
+				running_count=$(docker ps --filter "label=com.docker.compose.project=$project_name" --format '{{.Names}}' | wc -l)
+				if [[ "$running_count" -gt 0 ]]; then
+					echo -e "${YELLOW}Compose project [$project_name] There is already a container running, skip restore...${NC}"
+					continue
+				fi
+
+				read -p "Confirm restoring the Compose project [$project_name] to path [$original_path] ? (y/n): " confirm
+				[[ "$confirm" != "y" ]] && read -p "Please enter a new restore path:" original_path
+
+				mkdir -p "$original_path"
+				tar -xzf "$BACKUP_DIR/compose_project_${project_name}.tar.gz" -C "$original_path"
+				echo -e "${GREEN}Compose project [$project_name] Decompressed to:$original_path${NC}"
+
+				cd "$original_path" || return
+				docker compose down || true
+				docker compose up -d
+				echo -e "${GREEN}Compose project [$project_name] Restore is complete!${NC}"
+			fi
+		done
+
+		# -------------------------
+		echo -e "${BLUE}Check and restore a normal Docker container...${NC}"
+		local has_container=false
+		for json in "$BACKUP_DIR"/*_inspect.json; do
+			[[ ! -f "$json" ]] && continue
+			has_container=true
+			container=$(basename "$json" | sed 's/_inspect.json//')
+			echo -e "${GREEN}Processing container:$container${NC}"
+
+			# Check if the container already exists and is running
+			if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+				echo -e "${YELLOW}Container [$container] is running, skip restore...${NC}"
+				continue
+			fi
+
+			IMAGE=$(jq -r '.[0].Config.Image' "$json")
+			[[ -z "$IMAGE" || "$IMAGE" == "null" ]] && { echo -e "${RED}Mirror information was not found, skip:$container${NC}"; continue; }
+
+			# Port Mapping
+			PORT_ARGS=""
+			mapfile -t PORTS < <(jq -r '.[0].HostConfig.PortBindings | to_entries[]? | "\(.value[0].HostPort):\(.key | split("/")[0])"' "$json")
+			for p in "${PORTS[@]}"; do
+				[[ -n "$p" ]] && PORT_ARGS="$PORT_ARGS -p $p"
+			done
+
+			# Environment variables
+			ENV_ARGS=""
+			mapfile -t ENVS < <(jq -r '.[0].Config.Env[]' "$json")
+			for e in "${ENVS[@]}"; do
+				ENV_ARGS="$ENV_ARGS -e \"$e\""
+			done
+
+			# Volume Mapping + Volume Data Recovery
+			VOL_ARGS=""
+			mapfile -t VOLS < <(jq -r '.[0].Mounts[] | "\(.Source):\(.Destination)"' "$json")
+			for v in "${VOLS[@]}"; do
+				VOL_SRC=$(echo "$v" | cut -d':' -f1)
+				VOL_DST=$(echo "$v" | cut -d':' -f2)
+				mkdir -p "$VOL_SRC"
+				VOL_ARGS="$VOL_ARGS -v $VOL_SRC:$VOL_DST"
+
+				VOL_FILE="$BACKUP_DIR/${container}_$(basename $VOL_SRC).tar.gz"
+				if [[ -f "$VOL_FILE" ]]; then
+					echo "Recover volume data:$VOL_SRC"
+					tar -xzf "$VOL_FILE" -C /
+				fi
+			done
+
+			# Delete existing but not running containers
+			if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
+				echo -e "${YELLOW}Container [$container] Exist but not running, delete the old container...${NC}"
+				docker rm -f "$container"
+			fi
+
+			# Start the container
+			echo "Execute the restore command: docker run -d --name \"$container\" $PORT_ARGS $VOL_ARGS $ENV_ARGS \"$IMAGE\""
+			eval "docker run -d --name \"$container\" $PORT_ARGS $VOL_ARGS $ENV_ARGS \"$IMAGE\""
+		done
+
+		[[ "$has_container" == false ]] && echo -e "${YELLOW}No backup information for normal containers was found${NC}"
+
+		# Restore the file under /home/docker
+		if [ -f "$BACKUP_DIR/home_docker_files.tar.gz" ]; then
+			echo -e "${BLUE}Restore the file under /home/docker...${NC}"
+			mkdir -p /home/docker
+			tar -xzf "$BACKUP_DIR/home_docker_files.tar.gz" -C /
+			echo -e "${GREEN}The file under /home/docker has been restored${NC}"
+		else
+			echo -e "${YELLOW}No backup of the file under /home/docker was found, skip...${NC}"
+		fi
+
+
+	}
+
+
+	# ----------------------------
+	# migrate
+	# ----------------------------
+	migrate_docker() {
+		ensure_jq
+		list_backups
+		read -p "Please enter the backup directory to migrate:" BACKUP_DIR
+		[[ ! -d "$BACKUP_DIR" ]] && { echo -e "${RED}The backup directory does not exist${NC}"; return; }
+
+		read -p "Target server IP:" TARGET_IP
+		read -p "Target server SSH username:" TARGET_USER
+
+		LATEST_TAR="$BACKUP_DIR"  # 这里直接传整个目录
+
+		echo -e "${YELLOW}Transfer backup...${NC}"
+		if [[ -z "$TARGET_PASS" ]]; then
+			# Log in with a key
+			scp -o StrictHostKeyChecking=no -r "$LATEST_TAR" "$TARGET_USER@$TARGET_IP:/tmp/"
+		fi
+
+	}
+
+	# ----------------------------
+	# Delete backup
+	# ----------------------------
+	delete_backup() {
+		list_backups
+		read -p "Please enter the backup directory to delete:" BACKUP_DIR
+		[[ ! -d "$BACKUP_DIR" ]] && { echo -e "${RED}The backup directory does not exist${NC}"; return; }
+		rm -rf "$BACKUP_DIR"
+		echo -e "${GREEN}Deleted backup:${BACKUP_DIR}${NC}"
+	}
+
+	# ----------------------------
+	# Main Menu
+	# ----------------------------
+	main_menu() {
+		while true; do
+			clear
+			echo "------------------------"
+			echo -e "Docker backup/migration/restore tool"
+			echo "------------------------"
+			list_backups
+			echo -e ""
+			echo "------------------------"
+			echo -e "1. Backup the docker project"
+			echo -e "2. Migrate docker projects"
+			echo -e "3. Restore the docker project"
+			echo -e "4. Delete the backup file of the docker project"
+			echo "------------------------"
+			echo -e "0. Return to the previous menu"
+			echo "------------------------"
+			read -p "Please select:" choice
+			case $choice in
+				1) backup_docker ;;
+				2) migrate_docker ;;
+				3) restore_docker ;;
+				4) delete_backup ;;
+				0) return ;;
+				*) echo -e "${RED}Invalid option${NC}" ;;
+			esac
+		done
+	}
+
+	main_menu
+}
+
+
+
+
+
 linux_docker() {
 
 	while true; do
@@ -6875,6 +7195,7 @@ linux_docker() {
 	  echo -e "${gl_kjlan}11.  ${gl_bai}Enable Docker-ipv6 access"
 	  echo -e "${gl_kjlan}12.  ${gl_bai}Close Docker-ipv6 access"
 	  echo -e "${gl_kjlan}------------------------"
+	  echo -e "${gl_kjlan}19.  ${gl_bai}Backup/Migration/Restore Docker Environment"
 	  echo -e "${gl_kjlan}20.  ${gl_bai}Uninstall the Docker environment"
 	  echo -e "${gl_kjlan}------------------------"
 	  echo -e "${gl_kjlan}0.   ${gl_bai}Return to main menu"
@@ -7082,6 +7403,9 @@ linux_docker() {
 			  restart docker
 			  ;;
 
+
+
+
 		  11)
 			  clear
 			  send_stats "Docker v6 open"
@@ -7093,6 +7417,11 @@ linux_docker() {
 			  send_stats "Docker v6 level"
 			  docker_ipv6_off
 			  ;;
+
+		  19)
+			  docker_ssh_migration
+			  ;;
+
 
 		  20)
 			  clear
@@ -9815,8 +10144,10 @@ while true; do
 
 		docker_rum() {
 
+			ENCRYPTION_KEY=$(openssl rand -hex 32)
 			docker run -d \
 			  --name nexterm \
+			  -e ENCRYPTION_KEY=${ENCRYPTION_KEY} \
 			  -p ${docker_port}:6989 \
 			  -v /home/docker/nexterm:/app/data \
 			  --restart unless-stopped \
@@ -11331,7 +11662,6 @@ while true; do
 		  ;;
 
 
-
 	  b)
 	  	clear
 	  	send_stats "All applications backup"
@@ -11399,6 +11729,7 @@ while true; do
 	  	fi
 
 		  ;;
+
 
 	  0)
 		  kejilion
@@ -12759,7 +13090,7 @@ EOF
 
 			  echo "Privacy and Security"
 			  echo "The script will collect data on user functions, optimize the script experience, and create more fun and useful functions."
-			  echo "Will collect the script version number, usage time, system version, CPU architecture, country of the machine and the name of the function used,"
+			  echo "Will collect the script version number, usage time, system version, CPU architecture, country of the machine and the name of the functions used,"
 			  echo "------------------------------------------------"
 			  echo -e "Current status:$status_message"
 			  echo "--------------------"
