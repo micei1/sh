@@ -1,5 +1,5 @@
 #!/bin/bash
-sh_v="4.1.4"
+sh_v="4.1.5"
 
 
 gl_hui='\e[37m'
@@ -6870,16 +6870,13 @@ docker_ssh_migration() {
 	BLUE='\033[0;36m'
 	NC='\033[0m'
 
-	BACKUP_ROOT="/tmp"
-	DATE_STR=$(date +%Y%m%d_%H%M%S)
-
-
 	is_compose_container() {
 		local container=$1
 		docker inspect "$container" | jq -e '.[0].Config.Labels["com.docker.compose.project"]' >/dev/null 2>&1
 	}
 
 	list_backups() {
+		local BACKUP_ROOT="/tmp"
 		echo -e "${BLUE}当前备份列表:${NC}"
 		ls -1dt ${BACKUP_ROOT}/docker_backup_* 2>/dev/null || echo "无备份"
 	}
@@ -6899,6 +6896,8 @@ docker_ssh_migration() {
 		install tar jq gzip
 		install_docker
 
+		local BACKUP_ROOT="/tmp"
+		local DATE_STR=$(date +%Y%m%d_%H%M%S)
 		local TARGET_CONTAINERS=()
 		if [ -z "$containers" ]; then
 			mapfile -t TARGET_CONTAINERS < <(docker ps --format '{{.Names}}')
@@ -7126,13 +7125,15 @@ docker_ssh_migration() {
 
 		read -e -p  "目标服务器IP: " TARGET_IP
 		read -e -p  "目标服务器SSH用户名: " TARGET_USER
+		read -e -p "目标服务器SSH端口 [默认22]: " TARGET_PORT
+		local TARGET_PORT=${TARGET_PORT:-22}
 
-		LATEST_TAR="$BACKUP_DIR"  # 这里直接传整个目录
+		local LATEST_TAR="$BACKUP_DIR"
 
 		echo -e "${YELLOW}传输备份中...${NC}"
 		if [[ -z "$TARGET_PASS" ]]; then
 			# 使用密钥登录
-			scp -o StrictHostKeyChecking=no -r "$LATEST_TAR" "$TARGET_USER@$TARGET_IP:/tmp/"
+			scp -P "$TARGET_PORT" -o StrictHostKeyChecking=no -r "$LATEST_TAR" "$TARGET_USER@$TARGET_IP:/tmp/"
 		fi
 
 	}
@@ -8523,6 +8524,8 @@ linux_ldnmp() {
 		case "$choice" in
 		  [Yy])
 			read -e -p "请输入远端服务器IP:  " remote_ip
+			read -e -p "目标服务器SSH端口 [默认22]: " TARGET_PORT
+			local TARGET_PORT=${TARGET_PORT:-22}
 			if [ -z "$remote_ip" ]; then
 			  echo "错误: 请输入远端服务器IP。"
 			  continue
@@ -8531,7 +8534,7 @@ linux_ldnmp() {
 			if [ -n "$latest_tar" ]; then
 			  ssh-keygen -f "/root/.ssh/known_hosts" -R "$remote_ip"
 			  sleep 2  # 添加等待时间
-			  scp -o StrictHostKeyChecking=no "$latest_tar" "root@$remote_ip:/home/"
+			  scp -P "$TARGET_PORT" -o StrictHostKeyChecking=no "$latest_tar" "root@$remote_ip:/home/"
 			  echo "文件已传送至远程服务器home目录。"
 			else
 			  echo "未找到要传送的文件。"
@@ -12100,6 +12103,9 @@ while true; do
 			case "$choice" in
 			  [Yy])
 				read -e -p "请输入远端服务器IP:  " remote_ip
+				read -e -p "目标服务器SSH端口 [默认22]: " TARGET_PORT
+				local TARGET_PORT=${TARGET_PORT:-22}
+
 				if [ -z "$remote_ip" ]; then
 				  echo "错误: 请输入远端服务器IP。"
 				  continue
@@ -12108,7 +12114,7 @@ while true; do
 				if [ -n "$latest_tar" ]; then
 				  ssh-keygen -f "/root/.ssh/known_hosts" -R "$remote_ip"
 				  sleep 2  # 添加等待时间
-				  scp -o StrictHostKeyChecking=no "$latest_tar" "root@$remote_ip:/"
+				  scp -P "$TARGET_PORT" -o StrictHostKeyChecking=no "$latest_tar" "root@$remote_ip:/"
 				  echo "文件已传送至远程服务器/根目录。"
 				else
 				  echo "未找到要传送的文件。"
@@ -14198,6 +14204,7 @@ echo "软件状态查看        k status sshd | k 状态 sshd "
 echo "软件开机启动        k enable docker | k autostart docke | k 开机启动 docker "
 echo "域名证书申请        k ssl"
 echo "域名证书到期查询    k ssl ps"
+echo "docker管理平面      k docker"
 echo "docker环境安装      k docker install |k docker 安装"
 echo "docker容器管理      k docker ps |k docker 容器"
 echo "docker镜像管理      k docker img |k docker 镜像"
@@ -14408,7 +14415,7 @@ else
 					docker_image
 					;;
 				*)
-					k_info
+					linux_docker
 					;;
 			esac
 			;;
