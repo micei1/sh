@@ -11384,7 +11384,7 @@ while true; do
 		  local app_size="3"
 
 		  docker_app_install() {
-			  install git openssl
+			  install git openssl wget
 			  mkdir -p /home/docker/${docker_name} && cd /home/docker/${docker_name}
 
 			  wget -O docker-compose.yml ${gh_proxy}github.com/immich-app/immich/releases/latest/download/docker-compose.yml
@@ -14177,7 +14177,7 @@ while true; do
 			CheckFirstRun_true
 			yinsiyuanquan2
 			cp -f ~/kejilion.sh /usr/local/bin/k > /dev/null 2>&1
-			echo -e "${gl_lv}The script has been updated to the latest version!${gl_huang}v$sh_v_new${gl_bai}"
+			echo -e "${gl_lv}脚本已更新到最新版本！${gl_huang}v$sh_v_new${gl_bai}"
 			send_stats "The script is up to date$sh_v_new"
 			break_end
 			~/kejilion.sh
