@@ -1,5 +1,5 @@
 #!/bin/bash
-sh_v="4.3.0"
+sh_v="4.3.1"
 
 
 gl_hui='\e[37m'
@@ -59,7 +59,7 @@ CheckFirstRun_true() {
 
 # この機能は、機能の埋め込み情報を収集し、現在のスクリプトのバージョン番号、使用時間、システム バージョン、CPU アーキテクチャ、マシンの国、およびユーザーが使用した機能名を記録します。機密情報は含まれませんので、ご安心ください。信じてください！
 # なぜこの機能が設計されたのでしょうか?その目的は、ユーザーが使いたい機能をより深く理解し、機能をさらに最適化し、ユーザーのニーズを満たす機能をさらに投入することです。
-# send_stats 関数の呼び出し位置を全文検索できます。これは透明性があり、オープンソースです。ご心配な場合はご利用をお断りすることも可能です。
+# send_stats 関数の呼び出し位置を全文検索できます。これは透明性があり、オープンソースです。ご不安がある場合はご利用をお断りすることも可能です。
 
 
 
@@ -251,7 +251,7 @@ remove() {
 	fi
 
 	for package in "$@"; do
-		echo -e "${gl_huang}アンインストールする$package...${gl_bai}"
+		echo -e "${gl_huang}アンインストール中$package...${gl_bai}"
 		if command -v dnf &>/dev/null; then
 			dnf remove -y "$package"
 		elif command -v yum &>/dev/null; then
@@ -863,7 +863,7 @@ open_port() {
 	done
 
 	save_iptables_rules
-	send_stats "ポートがオープンされました"
+	send_stats "ポートがオープンしました"
 }
 
 
@@ -1816,7 +1816,7 @@ web_del() {
 		dbrootpasswd=$(grep -oP 'MYSQL_ROOT_PASSWORD:\s*\K.*' /home/web/docker-compose.yml | tr -d '[:space:]')
 
 		# エラーを避けるために、データベースを削除する前にデータベースが存在するかどうかを確認してください。
-		echo "データベースを削除しています:$dbname"
+		echo "正在删除数据库: $dbname"
 		docker exec mysql mysql -u root -p"$dbrootpasswd" -e "DROP DATABASE ${dbname};" > /dev/null 2>&1
 	done
 
@@ -2551,50 +2551,57 @@ done
 
 
 check_docker_image_update() {
-
 	local container_name=$1
+	update_status=""
 
-	local country=$(curl -s ipinfo.io/country)
-	if [[ "$country" == "CN" ]]; then
-		update_status=""
-		return
-	fi
+	# 1. 地域検査
+	local country=$(curl -s --max-time 2 ipinfo.io/country)
+	[[ "$country" == "CN" ]] && return
 
-	# コンテナの作成時刻とイメージ名を取得します。
+	# 2. ローカルミラー情報の取得
 	local container_info=$(docker inspect --format='{{.Created}},{{.Config.Image}}' "$container_name" 2>/dev/null)
+	[[ -z "$container_info" ]] && return
+
 	local container_created=$(echo "$container_info" | cut -d',' -f1)
-	local image_name=$(echo "$container_info" | cut -d',' -f2)
+	local full_image_name=$(echo "$container_info" | cut -d',' -f2)
+	local container_created_ts=$(date -d "$container_created" +%s 2>/dev/null)
 
-	# 画像リポジトリとタグを抽出する
-	local image_repo=${image_name%%:*}
-	local image_tag=${image_name##*:}
+	# 3. インテリジェントな配線判断
+	if [[ "$full_image_name" == ghcr.io* ]]; then
+		# --- シナリオ A: GitHub (ghcr.io) 上のミラー ---
+		# ウェアハウスのパスを抽出します (例: ghcr.io/onexru/oneimg -> onexru/oneimg)
+		local repo_path=$(echo "$full_image_name" | sed 's/ghcr.io\///' | cut -d':' -f1)
+		# 注: ghcr.io の API は比較的複雑です。通常、最も早い方法は、GitHub リポジトリのリリースを確認することです
+		local api_url="https://api.github.com/repos/$repo_path/releases/latest"
+		local remote_date=$(curl -s "$api_url" | jq -r '.published_at' 2>/dev/null)
 
-	# デフォルトのタグはlatestです
-	[[ "$image_repo" == "$image_tag" ]] && image_tag="latest"
+	elif [[ "$full_image_name" == *"oneimg"* ]]; then
+		# --- シナリオB：特別指定（Docker HubでもGitHub Releaseで判断したい） ---
+		local api_url="https://api.github.com/repos/onexru/oneimg/releases/latest"
+		local remote_date=$(curl -s "$api_url" | jq -r '.published_at' 2>/dev/null)
 
-	# 公式画像のサポートを追加
-	[[ "$image_repo" != */* ]] && image_repo="library/$image_repo"
-
-	# Docker Hub APIからイメージのリリース時刻を取得する
-	local hub_info=$(curl -s "https://hub.docker.com/v2/repositories/$image_repo/tags/$image_tag")
-	local last_updated=$(echo "$hub_info" | jq -r '.last_updated' 2>/dev/null)
-
-	# 取得した時間を確認する
-	if [[ -n "$last_updated" && "$last_updated" != "null" ]]; then
-		local container_created_ts=$(date -d "$container_created" +%s 2>/dev/null)
-		local last_updated_ts=$(date -d "$last_updated" +%s 2>/dev/null)
-
-		# タイムスタンプを比較する
-		if [[ $container_created_ts -lt $last_updated_ts ]]; then
-			update_status="${gl_huang}新しいバージョンが見つかりました!${gl_bai}"
-		else
-			update_status=""
-		fi
 	else
-		update_status=""
+		# --- シナリオ C: 標準 Docker ハブ ---
+		local image_repo=${full_image_name%%:*}
+		local image_tag=${full_image_name##*:}
+		[[ "$image_repo" == "$image_tag" ]] && image_tag="latest"
+		[[ "$image_repo" != */* ]] && image_repo="library/$image_repo"
+
+		local api_url="https://hub.docker.com/v2/repositories/$image_repo/tags/$image_tag"
+		local remote_date=$(curl -s "$api_url" | jq -r '.last_updated' 2>/dev/null)
 	fi
 
+	# 4. タイムスタンプの比較
+	if [[ -n "$remote_date" && "$remote_date" != "null" ]]; then
+		local remote_ts=$(date -d "$remote_date" +%s 2>/dev/null)
+		if [[ $container_created_ts -lt $remote_ts ]]; then
+			update_status="${gl_huang}新しいバージョンが見つかりました!${gl_bai}"
+		fi
+	fi
 }
+
+
+
 
 
 
@@ -3017,25 +3024,30 @@ docker_app_plus() {
 				echo "$docker_port" > "/home/docker/${docker_name}_port.conf"
 
 				add_app_id
+				send_stats "$app_nameインストール"
 				;;
+
 			2)
 				docker_app_update
-
 				add_app_id
+				send_stats "$app_name更新する"
 				;;
+
 			3)
 				docker_app_uninstall
 				rm -f /home/docker/${docker_name}_port.conf
 
 				sed -i "/\b${app_id}\b/d" /home/docker/appno.txt
-
+				send_stats "$app_nameアンインストールする"
 				;;
+
 			5)
 				echo "${docker_name}ドメイン名アクセス設定"
 				send_stats "${docker_name}ドメイン名アクセス設定"
 				add_yuming
 				ldnmp_Proxy ${yuming} 127.0.0.1 ${docker_port}
 				block_container_port "$docker_name" "$ipv4_address"
+
 				;;
 			6)
 				echo "ドメイン名の形式 example.com (https:// なし)"
@@ -3866,7 +3878,7 @@ ldnmp_web_status() {
 
 			8)
 				send_stats "サイト構成を編集する"
-				read -e -p "サイト構成を編集するには、編集するドメイン名を入力してください:" yuming
+				read -e -p "サイト設定を編集するには、編集するドメイン名を入力してください:" yuming
 				install nano
 				nano /home/web/conf.d/$yuming.conf
 				docker exec nginx nginx -s reload
@@ -4733,7 +4745,7 @@ while true; do
 	echo "2.国内DNSの最適化:"
 	echo " v4: 223.5.5.5 183.60.83.19"
 	echo " v6: 2400:3200::1 2400:da00::6666"
-	echo "3. DNS 設定を手動で編集する"
+	echo "3. DNS 構成を手動で編集する"
 	echo "------------------------"
 	echo "0. 前のメニューに戻る"
 	echo "------------------------"
@@ -4851,7 +4863,7 @@ add_sshkey() {
 		   -e 's/^\s*#\?\s*ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
 	rm -rf /etc/ssh/sshd_config.d/* /etc/ssh/ssh_config.d/*
 	restart_ssh
-	echo -e "${gl_lv}ROOT秘密キーログインがオンになり、ROOTパスワードログインがオフになり、再接続が有効になります${gl_bai}"
+	echo -e "${gl_lv}ROOT 秘密キー ログインがオンになり、ROOT パスワード ログインがオフになり、再接続が有効になります。${gl_bai}"
 
 }
 
@@ -4901,7 +4913,7 @@ echo -e "${gl_lv}ROOTログインの設定は完了です！${gl_bai}"
 
 root_use() {
 clear
-[ "$EUID" -ne 0 ] && echo -e "${gl_huang}ヒント：${gl_bai}この機能を使用するには、root ユーザーが実行する必要があります。" && break_end && kejilion
+[ "$EUID" -ne 0 ] && echo -e "${gl_huang}ヒント：${gl_bai}この機能を実行するには root ユーザーが必要です。" && break_end && kejilion
 }
 
 
@@ -5563,7 +5575,7 @@ clamav() {
 						;;
 					3)
 					  send_stats "カスタムディレクトリスキャン"
-					  read -e -p "スキャンするディレクトリをスペースで区切って入力してください (例: /etc /var /usr /home /root)。" directories
+					  read -e -p "スキャンするディレクトリをスペースで区切って入力してください (例: /etc /var /usr /home /root):" directories
 					  install_docker
 					  clamav_freshclam
 					  clamav_scan $directories
@@ -5785,7 +5797,7 @@ Kernel_optimize() {
 			  cd ~
 			  clear
 			  optimize_web_server
-			  send_stats "ウェブサイト最適化モデル"
+			  send_stats "ウェブサイト最適化モード"
 			  ;;
 		  4)
 			  cd ~
@@ -6532,7 +6544,7 @@ disk_manager() {
 			5) check_partition ;;
 			*) break ;;
 		esac
-		read -e -p "続行するには Enter キーを押してください..."
+		read -e -p "Enter を押して続行します..."
 	done
 }
 
@@ -6720,7 +6732,7 @@ run_task() {
 	else
 		echo "同期に失敗しました!以下の点をご確認ください。"
 		echo "1. ネットワーク接続は正常ですか?"
-		echo "2. リモート ホストにアクセスできますか?"
+		echo "2. リモートホストにアクセスできるかどうか"
 		echo "3. 認証情報は正しいですか?"
 		echo "4. ローカル ディレクトリとリモート ディレクトリには正しいアクセス許可がありますか?"
 	fi
@@ -6819,7 +6831,7 @@ rsync_manager() {
 			0) break ;;
 			*) echo "選択が無効です。もう一度お試しください。" ;;
 		esac
-		read -e -p "続行するには Enter キーを押してください..."
+		read -e -p "Enter を押して続行します..."
 	done
 }
 
@@ -6947,7 +6959,7 @@ linux_tools() {
 	  echo -e "${gl_kjlan}11.  ${gl_bai}btop 最新の監視ツール${gl_huang}★${gl_bai}             ${gl_kjlan}12.  ${gl_bai}レンジャーファイル管理ツール"
 	  echo -e "${gl_kjlan}13.  ${gl_bai}ncdu ディスク使用量表示ツール${gl_kjlan}14.  ${gl_bai}fzf グローバル検索ツール"
 	  echo -e "${gl_kjlan}15.  ${gl_bai}vim テキストエディタ${gl_kjlan}16.  ${gl_bai}ナノテキストエディタ${gl_huang}★${gl_bai}"
-	  echo -e "${gl_kjlan}17.  ${gl_bai}git バージョン管理システム"
+	  echo -e "${gl_kjlan}17.  ${gl_bai}git バージョン管理システム${gl_kjlan}18.  ${gl_bai}opencode AI プログラミング アシスタント${gl_huang}★${gl_bai}"
 	  echo -e "${gl_kjlan}------------------------"
 	  echo -e "${gl_kjlan}21.  ${gl_bai}マトリックス スクリーンセーバー${gl_kjlan}22.  ${gl_bai}走る電車のスクリーンセーバー"
 	  echo -e "${gl_kjlan}26.  ${gl_bai}テトリスのミニゲーム${gl_kjlan}27.  ${gl_bai}ヘビのミニゲーム"
@@ -7106,6 +7118,17 @@ linux_tools() {
 			  send_stats "gitをインストールする"
 			  ;;
 
+			18)
+			  clear
+			  cd ~
+			  curl -fsSL https://opencode.ai/install | bash
+			  source ~/.bashrc
+			  source ~/.profile
+			  opencode
+			  send_stats "オープンコードをインストールする"
+			  ;;
+
+
 			21)
 			  clear
 			  install cmatrix
@@ -7134,6 +7157,7 @@ linux_tools() {
 			  nsnake
 			  send_stats "nsnakeをインストールする"
 			  ;;
+
 			28)
 			  clear
 			  install ninvaders
@@ -7159,6 +7183,8 @@ linux_tools() {
 			  clear
 			  send_stats "すべてアンインストールする"
 			  remove htop iftop tmux ffmpeg btop ranger ncdu fzf cmatrix sl bastet nsnake ninvaders vim nano git
+			  opencode uninstall
+			  rm -rf ~/.opencode
 			  ;;
 
 		  41)
@@ -7510,7 +7536,7 @@ docker_ssh_migration() {
 
 		echo -e "${YELLOW}バックアップを転送中...${NC}"
 		if [[ -z "$TARGET_PASS" ]]; then
-			# キーでログイン
+			# キーを使用してログインする
 			scp -P "$TARGET_PORT" -o StrictHostKeyChecking=no -r "$LATEST_TAR" "$TARGET_USER@$TARGET_IP:/tmp/"
 		fi
 
@@ -9246,7 +9272,8 @@ if [ ! -d apps/.git ]; then
 	git clone ${gh_proxy}github.com/kejilion/apps.git
 else
 	cd apps
-	git pull origin main > /dev/null 2>&1
+	# git pull origin main > /dev/null 2>&1
+	git pull ${gh_proxy}github.com/kejilion/apps.git main > /dev/null 2>&1
 fi
 
 while true; do
@@ -9568,7 +9595,7 @@ while true; do
 			fi
 			echo ""
 			echo "------------------------"
-			echo "1. 使用する"
+			echo "1. 使用方法"
 			echo "------------------------"
 			echo "0. 前のメニューに戻る"
 			echo "------------------------"
@@ -9970,7 +9997,7 @@ while true; do
 
 		}
 
-		local docker_describe="Speedtest スピード テスト パネルは、複数のテスト機能を備えた VPS ネットワーク速度テスト ツールで、VPS のインバウンドおよびアウトバウンドのトラフィックをリアルタイムで監視することもできます。"
+		local docker_describe="Speedtest 速度測定パネルは、複数のテスト機能を備えた VPS ネットワーク速度テスト ツールで、VPS のインバウンドおよびアウトバウンドのトラフィックをリアルタイムで監視することもできます。"
 		local docker_url="公式サイト紹介：${gh_proxy}github.com/wikihost-opensource/als"
 		local docker_use=""
 		local docker_passwd=""
@@ -10189,12 +10216,12 @@ while true; do
 	  23|memos)
 		local app_id="23"
 		local docker_name="memos"
-		local docker_img="ghcr.io/usememos/memos:latest"
+		local docker_img="neosmemo/memos:stable"
 		local docker_port=8023
 
 		docker_rum() {
 
-			docker run -d --name memos -p ${docker_port}:5230 -v /home/docker/memos:/var/opt/memos --restart=always ghcr.io/usememos/memos:latest
+			docker run -d --name memos -p ${docker_port}:5230 -v /home/docker/memos:/var/opt/memos --restart=always neosmemo/memos:stable
 
 		}
 
@@ -10999,7 +11026,7 @@ while true; do
 		docker_app_update() {
 			cd  /home/docker/dify/docker/ && docker compose down --rmi all
 			cd  /home/docker/dify/
-			git pull origin main
+			git pull ${gh_proxy}github.com/langgenius/dify.git main > /dev/null 2>&1
 			sed -i 's/^EXPOSE_NGINX_PORT=.*/EXPOSE_NGINX_PORT=8058/; s/^EXPOSE_NGINX_SSL_PORT=.*/EXPOSE_NGINX_SSL_PORT=8858/' /home/docker/dify/docker/.env
 			cd  /home/docker/dify/docker/ && docker compose up -d
 		}
@@ -11042,7 +11069,8 @@ while true; do
 		docker_app_update() {
 			cd  /home/docker/new-api/ && docker compose down --rmi all
 			cd  /home/docker/new-api/
-			git pull origin main
+
+			git pull ${gh_proxy}github.com/Calcium-Ion/new-api.git main > /dev/null 2>&1
 			sed -i -e "s/- \"3000:3000\"/- \"${docker_port}:3000\"/g" \
 				   -e 's/container_name: redis/container_name: redis-new-api/g' \
 				   -e 's/container_name: mysql/container_name: mysql-new-api/g' \
@@ -11134,7 +11162,7 @@ while true; do
 	  62|ragflow)
 		local app_id="62"
 		local app_name="RAGFlow ナレッジベース"
-		local app_text="ドキュメントの深い理解に基づくオープンソース RAG (Retrieval Augmented Generation) エンジン"
+		local app_text="ドキュメントの深い理解に基づいたオープンソース RAG (Retrieval Augmented Generation) エンジン"
 		local app_url="公式ウェブサイト：https://github.com/infiniflow/ragflow"
 		local docker_name="ragflow-server"
 		local docker_port="8062"
@@ -11153,7 +11181,7 @@ while true; do
 		docker_app_update() {
 			cd  /home/docker/ragflow/docker/ && docker compose down --rmi all
 			cd  /home/docker/ragflow/
-			git pull origin main
+			git pull ${gh_proxy}github.com/infiniflow/ragflow.git main > /dev/null 2>&1
 			cd  /home/docker/ragflow/docker/
 			sed -i "s/- 80:80/- ${docker_port}:80/; /- 443:443/d" docker-compose.yml
 			docker compose up -d
@@ -11347,7 +11375,7 @@ while true; do
 
 		}
 
-		local docker_describe="オープンソースの AI チャットボット フレームワーク。WeChat、QQ、TG による AI の大規模モデルへのアクセスをサポート"
+		local docker_describe="オープンソース AI チャットボット フレームワーク。WeChat、QQ、TG による大規模 AI モデルへのアクセスをサポート"
 		local docker_url="公式サイト紹介：https://astrbot.app/"
 		local docker_use="echo \"ユーザー名: astrbot パスワード: astrbot\""
 		local docker_passwd=""
@@ -11403,7 +11431,7 @@ while true; do
 
 		}
 
-		local docker_describe="データを管理できるパスワードマネージャー"
+		local docker_describe="データを管理できるパスワード マネージャー"
 		local docker_url="公式サイト紹介：https://bitwarden.com/"
 		local docker_use=""
 		local docker_passwd=""
@@ -11637,7 +11665,7 @@ while true; do
 
 		}
 
-		local docker_describe="Beszel轻量易用的服务器监控"
+		local docker_describe="Beszel は軽量で使いやすいサーバー監視です"
 		local docker_url="公式サイト紹介：https://beszel.dev/zh/"
 		local docker_use=""
 		local docker_passwd=""
@@ -11651,7 +11679,7 @@ while true; do
 
 		  local app_id="80"
 		  local app_name="リンクワーデンのブックマーク管理"
-		  local app_text="タグ付け、検索、チーム コラボレーションをサポートする、オープン ソースの自己ホスト型ブックマーク管理プラットフォーム。"
+		  local app_text="タグ付け、検索、チーム コラボレーションをサポートするオープンソースの自己ホスト型ブックマーク管理プラットフォーム。"
 		  local app_url="公式サイト：https://linkwarden.app/"
 		  local docker_name="linkwarden-linkwarden-1"
 		  local docker_port="8080"
@@ -11960,7 +11988,7 @@ while true; do
 
 		}
 
-		local docker_describe="リモートで映画や生放送を一緒に視聴するプログラム。同時視聴、ライブブロードキャスト、チャットなどの機能を提供します"
+		local docker_describe="リモートで映画や生放送を一緒に見るプログラム。同時視聴、ライブブロードキャスト、チャットなどの機能を提供します"
 		local docker_url="公式サイト紹介：https://github.com/synctv-org/synctv"
 		local docker_use="echo \"初期アカウントとパスワード: root。ログイン後、時間内にログイン パスワードを変更してください\""
 		local docker_passwd=""
@@ -11990,7 +12018,7 @@ while true; do
 
 		}
 
-		local docker_describe="オープンソースの無料の自作ライブ ブロードキャスト プラットフォーム"
+		local docker_describe="オープンソース、無料の自社構築ライブ ブロードキャスト プラットフォーム"
 		local docker_url="公式サイト紹介：https://owncast.online"
 		local docker_use="echo \"管理者ページにアクセスするには、アクセス アドレスの後に /admin を続けます\""
 		local docker_passwd="echo \"初期アカウント: admin 初期パスワード: abc123 ログイン後、時間内にログイン パスワードを変更してください\""
@@ -12448,7 +12476,7 @@ while true; do
 			# ディレクトリが存在しない場合は作成する
 			mkdir -p "$(dirname "$CONFIG_FILE")"
 
-			echo "クライアント構成を貼り付け、Enter キーを 2 回押して保存してください。"
+			echo "クライアント設定を貼り付け、Enter キーを 2 回押して保存してください。"
 
 			# 変数を初期化する
 			input=""
@@ -12611,7 +12639,8 @@ while true; do
 		docker_app_update() {
 			cd  /home/docker/MoneyPrinterTurbo/ && docker compose down --rmi all
 			cd  /home/docker/MoneyPrinterTurbo/
-			git pull origin main
+
+			git pull ${gh_proxy}github.com/harry0703/MoneyPrinterTurbo.git main > /dev/null 2>&1
 			sed -i "s/8501:8501/${docker_port}:8501/g" /home/docker/MoneyPrinterTurbo/docker-compose.yml
 			cd  /home/docker/MoneyPrinterTurbo/ && docker compose up -d
 		}
@@ -12680,7 +12709,7 @@ while true; do
 		docker_app_update() {
 			cd  /home/docker/umami/ && docker compose down --rmi all
 			cd  /home/docker/umami/
-			git pull origin main
+			git pull ${gh_proxy}github.com/umami-software/umami.git main > /dev/null 2>&1
 			sed -i "s/8501:8501/${docker_port}:8501/g" /home/docker/umami/docker-compose.yml
 			cd  /home/docker/umami/ && docker compose up -d
 		}
@@ -12821,7 +12850,7 @@ discourse,yunsou,ahhhhfs,nsgame,gying" \
 		docker_app_update() {
 			cd  /home/docker/LangBot/docker && docker compose down --rmi all
 			cd  /home/docker/LangBot/
-			git pull origin main
+			git pull ${gh_proxy}github.com/langbot-app/LangBot main > /dev/null 2>&1
 			sed -i "s/5300:5300/${docker_port}:5300/g" /home/docker/LangBot/docker/docker-compose.yaml
 			cd  /home/docker/LangBot/docker/ && docker compose up -d
 		}
@@ -12891,7 +12920,7 @@ discourse,yunsou,ahhhhfs,nsgame,gying" \
 		docker_app_update() {
 			cd  /home/docker/karakeep/docker/ && docker compose down --rmi all
 			cd  /home/docker/karakeep/
-			git pull origin main
+			git pull ${gh_proxy}github.com/karakeep-app/karakeep.git main > /dev/null 2>&1
 			sed -i "s/3000:3000/${docker_port}:3000/g" /home/docker/karakeep/docker/docker-compose.yml
 			cd  /home/docker/karakeep/docker/ && docker compose up -d
 		}
@@ -12924,7 +12953,7 @@ discourse,yunsou,ahhhhfs,nsgame,gying" \
 
 		}
 
-		local docker_describe="これは強力なマルチフォーマット ファイル変換ツールです (ドキュメント、画像、オーディオ、ビデオなどをサポート)。ドメイン名アクセスを追加することを強くお勧めします。"
+		local docker_describe="これは、強力なマルチフォーマット ファイル変換ツールです (ドキュメント、画像、オーディオ、ビデオなどをサポート)。ドメイン名アクセスを追加することを強くお勧めします。"
 		local docker_url="プロジェクトアドレス: https://github.com/c4illin/ConvertX"
 		local docker_use=""
 		local docker_passwd=""
@@ -13077,7 +13106,8 @@ discourse,yunsou,ahhhhfs,nsgame,gying" \
 			git clone ${gh_proxy}github.com/kejilion/apps.git
 		else
 			cd apps
-			git pull origin main > /dev/null 2>&1
+			# git pull origin main > /dev/null 2>&1
+			git pull ${gh_proxy}github.com/kejilion/apps.git main > /dev/null 2>&1
 		fi
 		local custom_app="$HOME/apps/${sub_choice}.conf"
 		if [ -f "$custom_app" ]; then
@@ -13113,7 +13143,7 @@ linux_work() {
 	  echo -e "${gl_kjlan}2.   ${gl_bai}作業エリア 2"
 	  echo -e "${gl_kjlan}3.   ${gl_bai}作業エリア 3"
 	  echo -e "${gl_kjlan}4.   ${gl_bai}作業エリア 4"
-	  echo -e "${gl_kjlan}5.   ${gl_bai}作業エリア5"
+	  echo -e "${gl_kjlan}5.   ${gl_bai}ワークスペースNo.5"
 	  echo -e "${gl_kjlan}6.   ${gl_bai}作業エリア6"
 	  echo -e "${gl_kjlan}7.   ${gl_bai}作業エリア 7"
 	  echo -e "${gl_kjlan}8.   ${gl_bai}作業エリア8"
@@ -14382,7 +14412,7 @@ EOF
 			  echo "ワンストップのシステムチューニング"
 			  echo "------------------------------------------------"
 			  echo "以下のコンテンツを運用・最適化していきます"
-			  echo "1. システムアップデートソースを最適化し、システムを最新にアップデートします。"
+			  echo "1. システムアップデートソースを最適化し、システムを最新の状態にアップデートします。"
 			  echo "2. システムジャンクファイルをクリーンアップする"
 			  echo -e "3. 仮想メモリを設定する${gl_huang}1G${gl_bai}"
 			  echo -e "4. SSH ポート番号を次のように設定します。${gl_huang}5522${gl_bai}"
@@ -14836,7 +14866,7 @@ while true; do
 	  echo -e "${gl_kjlan}タスクをバッチで実行する${gl_bai}"
 	  echo -e "${gl_kjlan}11. ${gl_bai}テクノロジ ライオン スクリプトをインストールする${gl_kjlan}12. ${gl_bai}アップデートシステム${gl_kjlan}13. ${gl_bai}システムをクリーンアップする"
 	  echo -e "${gl_kjlan}14. ${gl_bai}ドッカーをインストールする${gl_kjlan}15. ${gl_bai}BBR3をインストールする${gl_kjlan}16. ${gl_bai}1Gの仮想メモリを設定する"
-	  echo -e "${gl_kjlan}17. ${gl_bai}タイムゾーンを上海に設定${gl_kjlan}18. ${gl_bai}すべてのポートを開く${gl_kjlan}51. ${gl_bai}カスタム命令"
+	  echo -e "${gl_kjlan}17. ${gl_bai}タイムゾーンを上海に設定${gl_kjlan}18. ${gl_bai}すべてのポートを開く${gl_kjlan}51. ${gl_bai}カスタムディレクティブ"
 	  echo -e "${gl_kjlan}------------------------${gl_bai}"
 	  echo -e "${gl_kjlan}0.  ${gl_bai}メインメニューに戻る"
 	  echo -e "${gl_kjlan}------------------------${gl_bai}"
@@ -15427,7 +15457,7 @@ else
 			shift
 			case $1 in
 				install|安装)
-					send_stats "Docker をすばやくインストールする"
+					send_stats "Dockerを素早くインストールする"
 					install_docker
 					;;
 				ps|容器)
